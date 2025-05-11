@@ -1,336 +1,137 @@
-A **Python‑based orchestration framework** that turns a Raspberry Pi (RPi) into the central test controller for an STM32 (or any UART‑capable) embedded target. The script automates the full HIL workflow—fetching the latest test assets, injecting emulated inputs, collecting serial output, and delegating pass/fail decisions—so you can focus on authoring high‑value test logic rather than plumbing.
+# HIL Tester CLI Tool
 
-```text
+This command-line tool facilitates Hardware-in-the-Loop (HIL) testing for STM32 microcontrollers using a Raspberry Pi. It automates flashing firmware, emulating input values via serial communication, and checking the STM32's output against expected results.
 
-+--------------------+       USB/UART       +-----------------------+
+## Features
 
-| Raspberry Pi 4/5   |<-------------------->|      STM32 Board      |
+-   Firmware flashing to STM32 (via `st-link`).
+-   Input emulation based on a flexible JSON format (serial commands, delays).
+-   Output verification against expected values defined in JSON.
+-   Support for "echo mode" testing (input = output) if expected values are not specified.
+-   Configurable serial port, baud rate, and flashing parameters.
 
-| • Python 3 driver  |                     |  (Target μC + FW)     |
+## Prerequisites
 
-| • Git repository   |                     |                       |
+-   Raspberry Pi with Raspberry Pi OS (or similar Linux).
+-   STM32 board connected to the RPi via ST-Link (for flashing) and USB-UART (for serial communication).
+-   **Python 3.7+** installed on the RPi.
+-   **pyserial** library: `pip3 install pyserial`
+-   **stlink-tools**: `sudo apt install stlink-tools` (provides `st-flash` utility). Ensure `st-flash` is in your system's PATH.
 
-| • GitHub Actions   |                     |  Sends DUT responses  |
-
-| • HIL orchestrator |                     |  via printf()/UART    |
-
-+--------------------+                     +-----------------------+
-
-         |
-
-         |  (optional)
-
-         |  GPIO/SPI/I²C to additional
-
-         |  stimulation hardware
-
-         v
-
-  +--------------------+
-
-  |   Emulation Layer  |
-
-  |  (custom scripts)  |
-
-  +--------------------+
+## Directory Structure
 
 ```
-
-
-### Data Flow
-
-
-1. **Fetch** latest commit from *main* (or CI copies repo).
-
-2. **Discover** test vectors inside `hardware_in-loop-testing/tests/`.
-
-3. **For each test**:
-
-	   1. Parse the JSON descriptor.
-
-	   2. Call *Emulation Hook* to drive inputs.
-
-	   3. Read serial output from STM32 until `TEST_COMPLETE` (or timeout).
-
-	   4. Call *Confirmation Hook* to decide pass/fail.
-
-4. **Aggregate** results and exit with a POSIX code suitable for CI.
-
+hil_tester_cli/
+├── main_test_runner.py       # Main CLI script
+├── stm32_flasher.py          # Module for flashing STM32
+├── value_emulator.py         # Module for input emulation
+├── output_checker.py         # Module for output checking
+├── serial_utils.py           # Serial communication utilities
+├── schemas/                  # Documentation for JSON formats
+│   ├── input_values_format.md
+│   └── expected_values_format.md
+└── README_cli_tool.md        # This README
 ```
 
-hardware_in-loop-testing/
+## JSON Formats
 
-├─ orchestrator/                  # <‑‑ This folder (Python entry point)
+Please refer to the following documents for details on the JSON structures:
 
-│  └─ rpi_hil_orchestrator.py     # Main script described below
+-   `schemas/input_values_format.md`: For defining the input emulation sequence.
+-   `schemas/expected_values_format.md`: For defining the expected outputs from the STM32.
 
-├─ tests/                         # JSON or test_*.py cases live here
+## Usage
 
-│  ├─ basic_blink.json            # Example vector
+The main script is `main_test_runner.py`.
 
-│  └─ ...
-
-├─ test_repo/                     # (optional) additional source artefacts
-
-│  └─ ...
-
-└─ .github/workflows/hil.yml      # CI pipeline
-
-```
-
-## Quick Start
-
-  
 ```bash
-
-# 0) Flash Raspberry Pi OS Lite, boot and enable UART
-
-sudo raspi-config      # Interface Options ▶ Serial Port ▶ Disable shell, Enable hw
-
-  
-
-# 1) Clone and install Python deps
-
-sudo apt update && sudo apt install -y git python3-pip
-
-  
-
-git clone https://github.com/tanujdargan/hardware_in-loop-testing.git
-
-cd hardware_in-loop-testing
-
-pip3 install -r requirements.txt
-
-  
-
-# 2) Edit config constants if your serial device is different
-
-nano orchestrator/rpi_hil_orchestrator.py   # SERIAL_PORT, BAUD_RATE
-
-  
-
-# 3) Wire RPi ↔ STM32 and power on the target
-
-  
-
-# 4) Run the entire test suite
-
-python3 orchestrator/rpi_hil_orchestrator.py
-
+python3 main_test_runner.py --code-to-test <path_to_firmware.bin> \
+                            --input-values <path_to_input.json> \
+                            [--expected-values <path_to_expected.json>] \
+                            [OPTIONS]
 ```
 
-  
+### Command-Line Arguments:
 
-Successful run prints something like:
+-   `--code-to-test FILE_PATH` (required): Path to the STM32 firmware file (.bin or .hex).
+-   `--input-values INPUT_JSON_PATH` (required): Path to the JSON file defining input values for emulation.
+-   `--expected-values EXPECTED_JSON_PATH` (optional): Path to the JSON file defining expected output values. If omitted, the tool attempts an "echo mode" where it expects the STM32 to echo back the payloads sent via `send_serial_line` actions (or specified `echo_payloads` in the input JSON).
+-   `--serial-port PORT` (optional): Serial port for STM32 communication (default: `/dev/ttyACM0`).
+-   `--baud-rate RATE` (optional): Baud rate for serial communication (default: `115200`).
+-   `--skip-flash` (optional flag): If set, skips the firmware flashing step.
+-   `--st-flash-cmd CMD` (optional): The command for the `st-flash` utility (default: `st-flash`).
+-   `--flash-address ADDR` (optional): Flash memory address for `st-flash` (default: `0x08000000`).
 
-  
+### Example:
 
-```
-
-Serial port /dev/ttyACM0 opened successfully at 115200 baud.
-
-Found 3 test(s). Starting test execution...
-
---- Executing Test Case: basic_blink.json ---
-
-[...]
-
---- Test Case basic_blink.json Finished ---
-
-Serial port closed at the end of testing.
-
-All tests completed.
-
-```
-  
-The script exits **0** if every case passes, otherwise a non‑zero code for CI
-## Configuration
-
-  
-| Variable           | Location                      | Description                                       |
-|--------------------|-------------------------------|---------------------------------------------------|
-| `SERIAL_PORT`      | `rpi_hil_orchestrator.py`     | `/dev/ttyUSB0`, `/dev/ttyACM0`, or GPIO.          |
-| `BAUD_RATE`        | `rpi_hil_orchestrator.py`     | Match your `printf()` baud (115200 Bd).           |
-| `TEST_REPO_PATH`   | `rpi_hil_orchestrator.py`     | Path to local clone; CI mounts here.              |
-| `TESTS_SUBFOLDER`  | `rpi_hil_orchestrator.py`     | Usually `tests`.                                  |
-| Git credentials    | Pi‑wide git config / deploy keys | Needed if the Pi pulls from a private repo.       |
-| Timeout constants  | `execute_test_case()`         | `max_receive_time_seconds`, etc.                  |
-
-
-
-You may also export environment variables and read them in the script if you prefer fully code‑free config.
-
-## Writing Tests
-
-Tests live in `hardware_in-loop-testing/tests/` and can be expressed as **JSON** (recommended for pure data) or a **Python script** (`test_*.py`) when you need dynamic logic.
-
-### JSON Schema (simplified)
-
-```jsonc
-
+```bash
+# Create example input.json
+cat << EOF > example_input.json
 {
-
-	"$schema": "https://example.com/hil.schema.json",
-
-	"name": "basic_blink",
-
-	"description": "Verify LED toggles every 500 ms and firmware replies PASS.",
-
-	"inputs_to_emulate": ["START_TEST", 2000],
-
-	"expected_outputs": ["LED_ON", "LED_OFF", "LED_ON", "LED_OFF", "TEST_COMPLETE"],
-
-	"meta": {
-
-		"timeout_s": 10,
-
-		"board_voltage": 3.3
-
-	}
+  "test_name": "Simple STM32 Echo Test",
+  "emulation_sequence": [
+    {
+      "action_id": "send1",
+      "type": "send_serial_line",
+      "payload": "HELLO_STM32"
+    },
+    {
+      "action_id": "wait1",
+      "type": "delay_ms",
+      "duration": 100
+    },
+    {
+      "action_id": "send2",
+      "type": "send_serial_line",
+      "payload": "TESTING_123"
+    }
+  ],
+  "echo_payloads": ["HELLO_STM32", "TESTING_123"] 
 }
+EOF
 
+# Assume stm32_firmware.bin exists and is programmed to echo serial lines
+# Run in echo mode (no --expected-values)
+python3 main_test_runner.py --code-to-test stm32_firmware.bin \
+                            --input-values example_input.json
+
+# Create example_expected.json
+cat << EOF > example_expected.json
+{
+  "test_name": "Simple STM32 Echo Test - Expected",
+  "expected_responses": [
+    {
+      "response_id": "echo_resp1",
+      "type": "exact_line",
+      "value": "STM32_ECHO:HELLO_STM32"
+    },
+    {
+      "response_id": "echo_resp2",
+      "type": "exact_line",
+      "value": "STM32_ECHO:TESTING_123"
+    }
+  ],
+  "response_timeout_ms": 2000,
+  "stop_condition_line": "ECHO_TEST_DONE"
+}
+EOF
+
+# Run with explicit expected values (STM32 firmware would need to send "STM32_ECHO:" prefix and "ECHO_TEST_DONE")
+python3 main_test_runner.py --code-to-test stm32_firmware.bin \
+                            --input-values example_input.json \
+                            --expected-values example_expected.json
 ```
 
-Fields you can rely on inside **`execute_test_case()`**:
-| Key                 | Type   | Purpose                                                            |
-|---------------------|--------|--------------------------------------------------------------------|
-| `inputs_to_emulate` | array  | Tokens passed to the *Emulation Hook*.                             |
-| `expected_outputs`  | array  | Lines – in order – that must appear on UART.                       |
-| `meta`              | object | Free‑form hints (custom timeout, supply rails, etc.).              |
+## Exit Codes
 
+-   `0`: All tests passed.
+-   `1`: Test failure (e.g., output mismatch, flashing error, serial error).
+-   `2`: Unexpected error during script execution.
 
-### Python‑based Vector
+## Notes on STM32 Firmware:
 
-If JSON is too rigid you may drop a `tests/test_pwm_sweep.py` containing a `run(ser)` function that uses the raw PySerial object and returns `True/False`.
-
-```python
-
-# tests/test_pwm_sweep.py
-
-import time
-
-  
-
-def run(ser):
-
-    ser.write(b"START_PWM\n")
-
-    deadline = time.time() + 5
-
-    while time.time() < deadline:
-
-        if b"TEST_COMPLETE" in ser.readline():
-
-            return True
-
-    return False
+-   The STM32 firmware should be configured to communicate over UART at the specified baud rate.
+-   For serial input, it should typically read line by line (e.g., until a newline `\n` character).
+-   It should `printf` or send its responses back over the same UART, with each distinct piece of information ideally on a new line.
 
 ```
-
-The orchestrator will automatically `importlib`‑load and execute it.
-## Integration Points
-
-The core script purposefully leaves **two stub functions** where teammates can inject their domain logic without touching the orchestrator:
-
-
-| Stub section | What to implement |
-|--------------|-------------------|
-| **Emulate Values** | Translate `inputs_to_emulate` → real stimuli. <br>Possible strategies: <br>• `ser.write()` UART tokens <br>• Bit‑banging RPi GPIOs <br>• Driving a USB‑CAN adapter |
-| **Confirm Tests** | Compare `received_data_lines` vs. `expected_outputs`. <br>Feel free to add filtering, regex, or timing checks &nbsp;— return **True** on pass, **False** on fail. |
-
-  
-
-> **Design Guideline**: Keep *hooks* in separate **modules** under `orchestrator/hooks/` so you can unit‑test them in isolation.
-### Hook API Contract
-
-```python
-
-# emulate.py
-
-  
-
-def emulate(test_config: dict, ser: serial.Serial) -> None:
-
-    """Inject inputs; must be blocking but predictable."""
-
-  
-
-# confirm.py
-
-  
-
-def confirm(test_config: dict, received: list[str]) -> bool:
-
-    """Return True on pass, False on fail."""
-
-```
-
-The orchestrator will import and call these automatically if present.
-## Continuous Integration ( GitHub Actions )
-
-A sample workflow **`.github/workflows/hil.yml`** installs Python, copies the repo onto the RPi (self‑hosted runner or `ssh-action`), and triggers the orchestrator:
-
-```yaml
-
-name: HIL Regression Suite
-
-on:
-
-  push:
-
-    branches: [main]
-
-  
-
-jobs:
-
-  hil:
-
-    runs-on: [self-hosted, rpi]
-
-    steps:
-
-      - uses: actions/checkout@v4
-
-      - name: Install deps
-
-        run: pip3 install -r requirements.txt
-
-      - name: Run HIL Suite
-
-        run: python3 orchestrator/rpi_hil_orchestrator.py
-
-```
-
-The job fails if the exit code ≠ 0, protecting the `main` branch from firmware regressions.
-## Troubleshooting
-
-| Symptom                         | Likely cause / fix                                                                                    |
-|---------------------------------|--------------------------------------------------------------------------------------------------------|
-| `Error opening serial port`     | Wrong `SERIAL_PORT`; run `dmesg \| grep tty` after plugging the device.                               |
-| Script hangs on read            | Firmware not sending newline; adjust the `ser.readline()` logic.                                      |
-| “No test files found”           | Path typo; confirm `TESTS_SUBFOLDER` exists on the Pi.                                                |
-| Git pull fails on Pi            | SSH key missing; add a deploy key or use HTTPS + token.                                               |
-| Random garbled UART characters  | Mismatched baud or voltage level; scope the RX line and verify it’s 3.3 V.                            |
-
-## Roadmap
-
-* [ ] JUnit‑xml or Allure result export for nicer dashboards.
-
-* [ ] Parallel test execution across multiple RPis.
-
-* [ ] Web UI with live logs (Flask + websockets).
-
-* [ ] YAML schema validation for test vectors.
-
-* [ ] Hardware abstraction layer for SPI/I²C/CAN emulation.
-
-## Contributing
-
-1. Fork the repo & create feature branch
-
-2. Add/Update **unit tests** for your changes.
-
-3. Open a PR—GitHub Actions must go green.
----
-**Made with ❤️ & caffeine (White Monster W).**
