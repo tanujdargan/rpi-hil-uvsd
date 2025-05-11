@@ -1,13 +1,4 @@
-# rpi-hil-uvsd# Raspberry Pi Hardware‑in‑the‑Loop (HIL) Test Orchestrator
-
 A **Python‑based orchestration framework** that turns a Raspberry Pi (RPi) into the central test controller for an STM32 (or any UART‑capable) embedded target. The script automates the full HIL workflow—fetching the latest test assets, injecting emulated inputs, collecting serial output, and delegating pass/fail decisions—so you can focus on authoring high‑value test logic rather than plumbing.
-
----
-
-  
-
-## Table of Contents
-  
 
 ```text
 
@@ -104,7 +95,7 @@ sudo apt update && sudo apt install -y git python3-pip
 
   
 
-git clone https://github.com/your‑org/hardware_in-loop-testing.git
+git clone https://github.com/tanujdargan/hardware_in-loop-testing.git
 
 cd hardware_in-loop-testing
 
@@ -156,22 +147,15 @@ The script exits **0** if every case passes, otherwise a non‑zero code for CI
 ## Configuration
 
   
+| Variable           | Location                      | Description                                       |
+|--------------------|-------------------------------|---------------------------------------------------|
+| `SERIAL_PORT`      | `rpi_hil_orchestrator.py`     | `/dev/ttyUSB0`, `/dev/ttyACM0`, or GPIO.          |
+| `BAUD_RATE`        | `rpi_hil_orchestrator.py`     | Match your `printf()` baud (115200 Bd).           |
+| `TEST_REPO_PATH`   | `rpi_hil_orchestrator.py`     | Path to local clone; CI mounts here.              |
+| `TESTS_SUBFOLDER`  | `rpi_hil_orchestrator.py`     | Usually `tests`.                                  |
+| Git credentials    | Pi‑wide git config / deploy keys | Needed if the Pi pulls from a private repo.       |
+| Timeout constants  | `execute_test_case()`         | `max_receive_time_seconds`, etc.                  |
 
-| Variable          | Location                            | Description                              |
-
-| ----------------- | ----------------------------------- | ---------------------------------------- |
-
-| `SERIAL_PORT`     | `rpi_hil_orchestrator.py`           | `/dev/ttyUSB0`, `/dev/ttyACM0`, or GPIO. |
-
-| `BAUD_RATE`       | »                                   | Match your `printf()` baud (115200 Bd).  |
-
-| `TEST_REPO_PATH`  | »                                   | Path to local clone; CI mounts here.     |
-
-| `TESTS_SUBFOLDER` | »                                   | Usually `tests`.                         |
-
-| Git creds         | Pi global git config or deploy keys | Needed if Pi pulls from private repo.    |
-
-| Timeout constants | `execute_test_case()`               | `max_receive_time_seconds`, etc.         |
 
 
 You may also export environment variables and read them in the script if you prefer fully code‑free config.
@@ -213,16 +197,12 @@ Tests live in `hardware_in-loop-testing/tests/` and can be expressed as **JSON**
 ```
 
 Fields you can rely on inside **`execute_test_case()`**:
+| Key                 | Type   | Purpose                                                            |
+|---------------------|--------|--------------------------------------------------------------------|
+| `inputs_to_emulate` | array  | Tokens passed to the *Emulation Hook*.                             |
+| `expected_outputs`  | array  | Lines – in order – that must appear on UART.                       |
+| `meta`              | object | Free‑form hints (custom timeout, supply rails, etc.).              |
 
-| Key                 | Type   | Purpose                                          |
-
-| ------------------- | ------ | ------------------------------------------------ |
-
-| `inputs_to_emulate` | array  | Tokens passed to the *Emulation Hook*.           |
-
-| `expected_outputs`  | array  | Lines – in order – that must appear on UART.     |
-
-| `meta`              | object | Free‑form hints (custom timeout, supply rails…). |
 
 ### Python‑based Vector
 
@@ -258,21 +238,10 @@ The orchestrator will automatically `importlib`‑load and execute it.
 The core script purposefully leaves **two stub functions** where teammates can inject their domain logic without touching the orchestrator:
 
 
-| Stub Section                                                      | What to Implement                                        |
-
-| ----------------------------------------------------------------- | -------------------------------------------------------- |
-
-| **Emulate Values**                                                | Translate `inputs_to_emulate` → real stimuli. Could be:  |
-
-| • `ser.write()` UART tokens                                       |                                                          |
-
-| • Bit‑banging RPi GPIOs                                           |                                                          |
-
-| • Driving a USB‑CAN adapter                                       |                                                          |
-
-| **Confirm Tests**                                                 | Compare `received_data_lines` versus `expected_outputs`. |
-
-| Support fancy filtering, regex, or timing checks. Return boolean. |                                                          |
+| Stub section | What to implement |
+|--------------|-------------------|
+| **Emulate Values** | Translate `inputs_to_emulate` → real stimuli. <br>Possible strategies: <br>• `ser.write()` UART tokens <br>• Bit‑banging RPi GPIOs <br>• Driving a USB‑CAN adapter |
+| **Confirm Tests** | Compare `received_data_lines` vs. `expected_outputs`. <br>Feel free to add filtering, regex, or timing checks &nbsp;— return **True** on pass, **False** on fail. |
 
   
 
@@ -341,19 +310,14 @@ jobs:
 The job fails if the exit code ≠ 0, protecting the `main` branch from firmware regressions.
 ## Troubleshooting
 
-| Symptom                        | Likely Cause / Fix                                           |                            |
+| Symptom                         | Likely cause / fix                                                                                    |
+|---------------------------------|--------------------------------------------------------------------------------------------------------|
+| `Error opening serial port`     | Wrong `SERIAL_PORT`; run `dmesg \| grep tty` after plugging the device.                               |
+| Script hangs on read            | Firmware not sending newline; adjust the `ser.readline()` logic.                                      |
+| “No test files found”           | Path typo; confirm `TESTS_SUBFOLDER` exists on the Pi.                                                |
+| Git pull fails on Pi            | SSH key missing; add a deploy key or use HTTPS + token.                                               |
+| Random garbled UART characters  | Mismatched baud or voltage level; scope the RX line and verify it’s 3.3 V.                            |
 
-| ------------------------------ | ------------------------------------------------------------ | -------------------------- |
-
-| `Error opening serial port`    | Wrong `SERIAL_PORT`; run \`dmesg                             | grep tty\` after plugging. |
-
-| Script hangs on read           | Firmware not sending newline; change `ser.readline()` logic. |                            |
-
-| "No test files found"          | Path typo; confirm `TESTS_SUBFOLDER` exists on Pi.           |                            |
-
-| Git pull fails on Pi           | SSH key missing; add deploy key or use HTTPS & token.        |                            |
-
-| Random garbled UART characters | Mismatched baud or voltage; scope RX line & verify 3.3 V.    |   
 ## Roadmap
 
 * [ ] JUnit‑xml or Allure result export for nicer dashboards.
