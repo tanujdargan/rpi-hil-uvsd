@@ -170,28 +170,23 @@ Tests live in `hardware_in-loop-testing/tests/` and can be expressed as **JSON**
 
 {
 
-  "$schema": "https://example.com/hil.schema.json",
+	"$schema": "https://example.com/hil.schema.json",
 
-  "name": "basic_blink",
+	"name": "basic_blink",
 
-  "description": "Verify LED toggles every 500 ms and firmware replies PASS.",
+	"description": "Verify LED toggles every 500 ms and firmware replies PASS.",
 
-  "inputs_to_emulate": ["START_TEST", 2000],
+	"inputs_to_emulate": ["START_TEST", 2000],
 
-  "expected_outputs": [
+	"expected_outputs": ["LED_ON", "LED_OFF", "LED_ON", "LED_OFF", "TEST_COMPLETE"],
 
-    "LED_ON", "LED_OFF", "LED_ON", "LED_OFF", "TEST_COMPLETE"
+	"meta": {
 
-  ],
+		"timeout_s": 10,
 
-  "meta": {
+		"board_voltage": 3.3
 
-    "timeout_s": 10,
-
-    "board_voltage": 3.3
-
-  }
-
+	}
 }
 
 ```
