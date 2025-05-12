@@ -134,8 +134,6 @@ python3 main_test_runner.py --code-to-test stm32_firmware.bin \
 -   For serial input, it should typically read line by line (e.g., until a newline `\n` character).
 -   It should `printf` or send its responses back over the same UART, with each distinct piece of information ideally on a new line.
 
-```
-
 ## TODO:
 - Improve JSON stream handling in serial_receiver.py (consider framing protocols).
 
