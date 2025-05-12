@@ -135,3 +135,16 @@ python3 main_test_runner.py --code-to-test stm32_firmware.bin \
 -   It should `printf` or send its responses back over the same UART, with each distinct piece of information ideally on a new line.
 
 ```
+
+## TODO:
+- Improve JSON stream handling in serial_receiver.py (consider framing protocols).
+
+- Expand compare_json_structures to support advanced string validators like CHOICE.
+
+- Strengthen error handling around GPIO and serial communication.
+
+- Validate mock GPIO implementation across non-RPi systems.
+
+- Ensure complete STM32 firmware support for pin input and UART output.
+
+- Add more test coverage for GPIO control and JSON comparison edge cases.

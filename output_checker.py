@@ -1,186 +1,214 @@
+# hil_tester_cli/output_checker.py
 import json
 import re
-from .serial_utils import SerialConnection # For type hinting if needed, not direct use here
 
-def check_output(received_lines: list, expected_json_path: str = None, 
-                 input_data_for_fallback: dict = None, serial_conn: SerialConnection = None):
+def compare_json_structures(received_obj, expected_obj, path="root"):
     """
-    Checks the received serial lines against expected values defined in a JSON file
-    or falls back to input=output echo mode if expected_json_path is not provided.
+    Recursively compares a received Python object (from parsed JSON) against an
+    expected Python object (from parsed expected_values JSON which includes validation rules).
+    Returns a list of discrepancies (strings).
+    """
+    discrepancies = []
 
-    Args:
-        received_lines (list): A list of strings received from the STM32.
-        expected_json_path (str, optional): Path to the JSON file defining expected outputs.
-        input_data_for_fallback (dict, optional): Parsed input JSON data, used if expected_json_path is None.
-        serial_conn (SerialConnection, optional): The serial connection, used to get more lines if needed by stop_condition.
+    if isinstance(expected_obj, dict) and isinstance(received_obj, dict):
+        # Check for missing keys in received that are expected (unless ANY_OR_MISSING)
+        for key, exp_val in expected_obj.items():
+            current_path = f"{path}.{key}"
+            if key not in received_obj:
+                if isinstance(exp_val, str) and exp_val == "ANY_OR_MISSING":
+                    # It's okay if it's missing
+                    pass
+                elif isinstance(exp_val, dict) and exp_val.get("$optional") is True:
+                    pass # Also okay if marked as optional
+                else:
+                    discrepancies.append(f"Missing key '{current_path}' in received data.")
+            else: # Key exists, compare values
+                rec_val = received_obj[key]
+                discrepancies.extend(compare_json_structures(rec_val, exp_val, current_path))
+        
+        # Optional: Check for extra keys in received that were not expected
+        # for key in received_obj:
+        #     if key not in expected_obj:
+        #         discrepancies.append(f"Extra key '{path}.{key}' found in received data.")
 
-    Returns:
-        bool: True if all checks pass, False otherwise.
+    elif isinstance(expected_obj, list) and isinstance(received_obj, list):
+        # Basic list comparison: must have same length and elements must match in order
+        # More complex array matching rules (array_contains_all, array_each_matches_ordered)
+        # would be handled if `expected_obj` was a dict like `{"type": "array_contains_all", ...}`
+        if len(received_obj) != len(expected_obj):
+            discrepancies.append(f"Array length mismatch at '{path}'. Expected {len(expected_obj)}, Got {len(received_obj)}.")
+        else:
+            for i, (rec_item, exp_item) in enumerate(zip(received_obj, expected_obj)):
+                discrepancies.extend(compare_json_structures(rec_item, exp_item, f"{path}[{i}]"))
+
+    elif isinstance(expected_obj, str): # Special validation string
+        # Handle special string validators like "TYPE:string", "REGEX:pattern", etc.
+        if expected_obj == "ANY":
+            pass # Matches anything, no discrepancy
+        elif expected_obj == "ANY_OR_MISSING": # Already handled by key check
+            pass
+        elif expected_obj.startswith("TYPE:"):
+            type_name = expected_obj.split(":", 1)[1]
+            type_map = {"string": str, "number": (int, float), "boolean": bool, "array": list, "object": dict, "null": type(None)}
+            if type_name not in type_map:
+                discrepancies.append(f"Invalid expected type '{type_name}' at '{path}'.")
+            elif not isinstance(received_obj, type_map[type_name]):
+                discrepancies.append(f"Type mismatch at '{path}'. Expected {type_name}, Got {type(received_obj).__name__}.")
+        elif expected_obj.startswith("REGEX:"):
+            pattern = expected_obj.split(":", 1)[1]
+            if not isinstance(received_obj, str) or not re.search(pattern, received_obj):
+                discrepancies.append(f"Regex mismatch at '{path}'. Value '{received_obj}' does not match pattern '{pattern}'.")
+        elif expected_obj.startswith("VALUE_GT:"):
+            try:
+                num = float(expected_obj.split(":",1)[1])
+                if not (isinstance(received_obj, (int,float)) and received_obj > num):
+                    discrepancies.append(f"Value at '{path}' ('{received_obj}') not > {num}.")
+            except ValueError: discrepancies.append(f"Invalid number for VALUE_GT at '{path}'.")
+        elif expected_obj.startswith("VALUE_GTE:"):
+            try:
+                num = float(expected_obj.split(":",1)[1])
+                if not (isinstance(received_obj, (int,float)) and received_obj >= num):
+                    discrepancies.append(f"Value at '{path}' ('{received_obj}') not >= {num}.")
+            except ValueError: discrepancies.append(f"Invalid number for VALUE_GTE at '{path}'.")
+        # ... Implement LT, LTE, CONTAINS, NOT, LENGTH, CHOICE similarly ...
+        elif expected_obj.startswith("CHOICE:["):
+            try:
+                choices_str = expected_obj[len("CHOICE:["):-1] # Remove CHOICE:[]
+                # This is a bit naive for parsing a list within a string.
+                # A safer way would be `json.loads("[" + choices_str + "]")` if choices_str is proper comma-separated JSON values
+                # For simplicity, assuming comma-separated strings, possibly quoted.
+                # Example: CHOICE:['red','green','blue'] or CHOICE:[1,2,3]
+                # For robust choice parsing, the expected_values_format.md should specify choices as a JSON array.
+                # Let's assume for now the spec means choices are actual list in the JSON schema if parsed correctly.
+                # This logic path is hit if expected_obj is a *string*. If choices were a list, it'd hit list comparison.
+                # This indicates a design flaw in how CHOICE:[...] is defined as a string vs. actual list.
+                # For now, this will likely fail unless the expected_values.json defines choice values differently.
+                # Revisit: The schema for `CHOICE` should define it as an actual list in the `expected_responses`.
+                # The example ` "unit": "CHOICE:['C','F']"` is problematic.
+                # It should be ` "unit": { "type": "choice", "values": ["C", "F"] }`
+                discrepancies.append(f"CHOICE string validator at '{path}' needs rework in schema and implementation.")
+
+            except Exception as e:
+                 discrepancies.append(f"Error parsing CHOICE at '{path}': {e}.")
+
+        else: # Exact literal match
+            if received_obj != expected_obj:
+                discrepancies.append(f"Value mismatch at '{path}'. Expected '{expected_obj}', Got '{received_obj}'.")
+                
+    elif isinstance(expected_obj, dict) and "$comment" in expected_obj: # Handle custom dict rules if any
+        # E.g. for array item validation: { "type": "array_contains_all", "values": [...] }
+        # This part needs more fleshing out based on the array matching rules from the schema doc
+        # For now, this is a placeholder
+        # discrepancies.append(f"Custom dict rule at '{path}' not fully implemented for comparison.")
+        # Fallback to basic dict comparison or type check for now
+        if not isinstance(received_obj, type(expected_obj)): # Simplistic check
+             discrepancies.append(f"Type mismatch for complex rule at '{path}'. Expected {type(expected_obj).__name__}, Got {type(received_obj).__name__}.")
+
+
+    else: # Default: Exact literal match for numbers, booleans, null
+        if received_obj != expected_obj:
+            discrepancies.append(f"Value mismatch at '{path}'. Expected '{expected_obj}', Got '{received_obj}'.")
+            
+    return discrepancies
+
+
+def check_output(received_data_obj_or_list_of_lines: any, # Can be parsed JSON (dict/list) or list of lines
+                 expected_json_path: str = None,
+                 input_data_for_fallback: dict = None): # Fallback not really used with pin emulation
+    """
+    Checks received data against expected values.
     """
     print("\n--- Output Checking ---")
-    expected_data = None
-    is_echo_mode = False
+    
+    if not expected_json_path:
+        print("Warning: No --expected-values JSON file provided. Meaningful output checking cannot be performed.")
+        print("Output Checking Summary: SKIPPED (no expectations defined)")
+        return True # Or False if strictness requires expectations
 
-    if expected_json_path:
-        try:
-            with open(expected_json_path, 'r') as f:
-                expected_data = json.load(f)
-            print(f"Loaded expected values from: {expected_json_path}")
-        except FileNotFoundError:
-            print(f"Warning: Expected values JSON file not found at '{expected_json_path}'.")
-            if not input_data_for_fallback:
-                print("Error: No expected values file and no input data for fallback. Cannot perform checks.")
-                return False
-            print("Attempting to use input-as-output (echo) mode based on fallback data.")
-            is_echo_mode = True
-        except json.JSONDecodeError as e:
-            print(f"Error: Could not decode Expected JSON file '{expected_json_path}': {e}")
-            return False
-    elif input_data_for_fallback:
-        print("No expected values file provided. Using input-as-output (echo) mode.")
-        is_echo_mode = True
-    else:
-        print("Error: No expected values provided (neither file nor fallback data). Cannot perform checks.")
+    try:
+        with open(expected_json_path, 'r') as f:
+            expected_config = json.load(f)
+        print(f"Loaded expected values from: {expected_json_path}")
+    except FileNotFoundError:
+        print(f"Error: Expected values JSON file not found at '{expected_json_path}'.")
+        return False
+    except json.JSONDecodeError as e:
+        print(f"Error: Could not decode Expected JSON file '{expected_json_path}': {e}")
         return False
 
-    if is_echo_mode:
-        # Try to derive expected outputs from input_data_for_fallback
-        if input_data_for_fallback.get("echo_payloads"):
-            expected_outputs_list = input_data_for_fallback["echo_payloads"]
-        elif input_data_for_fallback.get("emulation_sequence"):
-            # Basic fallback: expect echoes of 'send_serial_line' payloads
-            expected_outputs_list = [
-                action["payload"] for action in input_data_for_fallback["emulation_sequence"]
-                if action.get("type") == "send_serial_line" and "payload" in action
-            ]
-            if not expected_outputs_list:
-                print("Error (Echo Mode): Could not derive expected echo outputs from input data.")
-                return False
-        else:
-            print("Error (Echo Mode): Input data does not contain 'echo_payloads' or usable 'emulation_sequence'.")
-            return False
-        
-        # Convert this to the standard expected_responses format for the checker logic
-        expected_data = {
-            "test_name": input_data_for_fallback.get("test_name", "Echo Test") + " (Echo Mode)",
-            "expected_responses": [
-                {"response_id": f"echo_resp_{i}", "type": "exact_line", "value": str(val)}
-                for i, val in enumerate(expected_outputs_list)
-            ]
-        }
-        print(f"Echo Mode: Expecting {len(expected_outputs_list)} lines to be echoed.")
+    reception_mode = expected_config.get("reception_mode", "lines")
+    expected_responses_definition = expected_config.get("expected_responses")
 
-    if not expected_data or not expected_data.get("expected_responses"):
-        print("No expected responses defined to check against. Marking as PASSED by default (vacuously true).")
-        return True # Or False, depending on desired strictness for empty expectations
+    if expected_responses_definition is None:
+        print("Warning: No 'expected_responses' found in the expected values JSON. SKIPPED.")
+        return True
 
-    # --- Start actual checking ---
-    expected_responses = expected_data.get("expected_responses", [])
-    
     overall_pass = True
-    num_expected = len(expected_responses)
-    num_received = len(received_lines)
-    
-    print(f"Expected {num_expected} response items. Received {num_received} lines.")
-    print("Received Lines:")
-    for i, line in enumerate(received_lines):
-        print(f"  [{i}]: \"{line}\"")
-    
-    expected_idx = 0
-    received_idx = 0
-    
     results_log = []
 
-    while expected_idx < num_expected and received_idx < num_received:
-        expected_item = expected_responses[expected_idx]
-        current_received_line = received_lines[received_idx]
-
-        resp_id = expected_item.get("response_id", f"exp{expected_idx}")
-        exp_type = expected_item.get("type")
-        exp_value = expected_item.get("value") # For exact/contains
-        exp_pattern = expected_item.get("pattern") # For regex
-        exp_ignore_count = expected_item.get("count") # For ignore_line_count
-
-        match = False
-        consumed_received_line = True # Most types consume one received line
-
-        log_entry = f"  Checking Exp[{expected_idx}] ('{resp_id}', Type: {exp_type})"
-        
-        if exp_type == "exact_line":
-            if current_received_line == exp_value:
-                match = True
-            log_entry += f" vs Rec[{received_idx}] ('{current_received_line}'). Expected: '{exp_value}'."
-        elif exp_type == "contains_string":
-            if exp_value in current_received_line:
-                match = True
-            log_entry += f" vs Rec[{received_idx}] ('{current_received_line}'). Expected to contain: '{exp_value}'."
-        elif exp_type == "regex_match":
-            try:
-                if re.search(exp_pattern, current_received_line):
-                    match = True
-            except re.error as e:
-                log_entry += f" - Regex error: {e}."
-                match = False # Error in pattern
-            log_entry += f" vs Rec[{received_idx}] ('{current_received_line}'). Expected regex: '{exp_pattern}'."
-        elif exp_type == "ignore_line_count":
-            # This type always "matches" its condition of ignoring.
-            # It effectively advances received_idx by 'count'.
-            log_entry += f" - Ignoring {exp_ignore_count} lines."
-            match = True 
-            consumed_received_line = False # Does not consume the *current* line for matching itself
-            
-            # Check if enough lines are left to ignore
-            if received_idx + exp_ignore_count <= num_received:
-                log_entry += f" (Ignored Rec[{received_idx}] to Rec[{received_idx + exp_ignore_count -1}])."
-                received_idx += exp_ignore_count # Advance received index
-            else:
-                log_entry += f" - Not enough lines left to ignore {exp_ignore_count}. Only {num_received - received_idx} available. FAILED."
-                match = False # Cannot fulfill ignore if not enough lines
-                received_idx = num_received # Consume all remaining
-            expected_idx += 1 # Move to next expected item
-            results_log.append(log_entry + (" PASSED (ignored)" if match else " FAILED"))
-            if not match: overall_pass = False
-            continue # Skip normal increment
-        else:
-            log_entry += f" - Unknown expected type '{exp_type}'. FAILED."
-            match = False
-            overall_pass = False # Critical error in test definition
-
-        if match:
-            log_entry += " PASSED."
-            expected_idx += 1
-            if consumed_received_line:
-                received_idx += 1
-        else:
-            log_entry += " FAILED."
+    if reception_mode == "json_object":
+        if not isinstance(received_data_obj_or_list_of_lines, dict):
+            results_log.append(f"FAIL: Reception mode is 'json_object', but received data is not a parsed dictionary. Received type: {type(received_data_obj_or_list_of_lines)}")
+            if isinstance(received_data_obj_or_list_of_lines, dict) and "error" in received_data_obj_or_list_of_lines: # Check if it's our error dict from serial_receiver
+                results_log.append(f"  Details: {received_data_obj_or_list_of_lines.get('buffer', 'No buffer info')}")
             overall_pass = False
-            # Decide on failure strategy: stop on first fail, or try to match subsequent?
-            # For now, strict: if an expected item isn't found, subsequent matches are harder to align.
-            # A more resilient strategy would try to find the current expected_item further down received_lines.
-            # For simplicity: advance received_idx to see if the *next* expected matches *this* received.
-            # This means this current received line did not match the current expected.
-            if consumed_received_line: # Only advance if current line was "used" for the check
-                 received_idx += 1 
-            # To make it stricter, we could break here or only increment expected_idx if match.
-            # For now, this allows an expected item to be "missed" and we still check later ones.
-            # But if an expected item is critical, this might not be desired.
+        else:
+            results_log.append("Mode: Comparing received JSON object against expected JSON structure.")
+            discrepancies = compare_json_structures(received_data_obj_or_list_of_lines, expected_responses_definition)
+            if discrepancies:
+                overall_pass = False
+                results_log.append("  Discrepancies Found:")
+                for d in discrepancies:
+                    results_log.append(f"    - {d}")
+            else:
+                results_log.append("  Received JSON object matches expected structure and values. PASSED.")
+    
+    elif reception_mode == "lines":
+        if not isinstance(received_data_obj_or_list_of_lines, list):
+            results_log.append(f"FAIL: Reception mode is 'lines', but received data is not a list of lines. Type: {type(received_data_obj_or_list_of_lines)}")
+            overall_pass = False
+        else:
+            # Use the line-by-line comparison logic (adapted from previous version)
+            results_log.append("Mode: Comparing received lines against expected line sequence.")
+            expected_line_items = expected_responses_definition
+            received_lines = received_data_obj_or_list_of_lines
+            
+            num_expected = len(expected_line_items)
+            num_received = len(received_lines)
+            expected_idx = 0
+            received_idx = 0
 
-        results_log.append(log_entry)
+            while expected_idx < num_expected and received_idx < num_received:
+                exp_item = expected_line_items[expected_idx]
+                curr_rec_line = received_lines[received_idx]
+                resp_id = exp_item.get("response_id", f"exp_line_{expected_idx}")
+                exp_type = exp_item.get("type")
+                log_line = f"  Checking ExpLine[{expected_idx}] ('{resp_id}', Type: {exp_type})"
+                match = False
 
-    # After loop, check if all expected items were processed
-    if expected_idx < num_expected:
-        results_log.append(f"  FAIL: Not all expected responses were matched. Expected {num_expected}, matched {expected_idx}.")
+                if exp_type == "exact_line":
+                    if curr_rec_line == exp_item.get("value"): match = True
+                    log_line += f" vs RecLine[{received_idx}] ('{curr_rec_line}'). Expected: '{exp_item.get('value')}'."
+                # ... (add other line types: contains_string, regex_match, ignore_line_count) ...
+                else:
+                    log_line += " - Unknown line type. FAILED."
+                
+                if match:
+                    log_line += " PASSED."
+                    expected_idx += 1
+                    received_idx += 1
+                else:
+                    log_line += " FAILED."
+                    overall_pass = False
+                    received_idx += 1 # Try next received line against current expected, or implement smarter skip
+                results_log.append(log_line)
+
+            if expected_idx < num_expected:
+                results_log.append(f"  FAIL: Not all expected lines were matched. Expected {num_expected}, matched {expected_idx}.")
+                overall_pass = False
+    else:
+        results_log.append(f"FAIL: Unknown reception_mode: '{reception_mode}'.")
         overall_pass = False
-        for i in range(expected_idx, num_expected):
-             results_log.append(f"    Missed expected item: ID '{expected_responses[i].get('response_id', 'N/A')}', Type '{expected_responses[i].get('type')}'")
-
-
-    # Optionally, check if there are unprocessed received lines (STM32 sent more than expected)
-    # This might be an error or just verbose output, depending on test strictness.
-    if received_idx < num_received and overall_pass: # Only a warning if other tests passed
-        results_log.append(f"  Warning: {num_received - received_idx} additional lines received from STM32 that were not checked.")
-        for i in range(received_idx, num_received):
-            results_log.append(f"    Unchecked Rec[{i}]: \"{received_lines[i]}\"")
 
     print("\nDetailed Check Results:")
     for log in results_log:
