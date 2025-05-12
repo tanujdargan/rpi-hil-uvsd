@@ -1,11 +1,14 @@
 import time
 
-# Attempt to import RPi.GPIO and handle cases where it might not be available (e.g., dev machine)
+# Attempt to import RPi.GPIO and handle cases where it might not be available
 try:
     import RPi.GPIO as GPIO
     HAS_GPIO_LIB = True
 except ImportError:
+    print("---------------------------------------------------------------------")
     print("Warning: RPi.GPIO library not found. GPIO operations will be mocked.")
+    print("Ensure RPi.GPIO is installed on a Raspberry Pi for actual hardware control (e.g., sudo apt-get install python3-rpi.gpio)")
+    print("---------------------------------------------------------------------")
     HAS_GPIO_LIB = False
     # Mock GPIO class for development on non-RPi systems
     class MockGPIO:
@@ -20,171 +23,260 @@ except ImportError:
         
         def __init__(self):
             self._mode = None
-            self._pin_setups = {} # pin: {"mode": OUT/IN, "value": HIGH/LOW, "pud": PUD_UP/DOWN}
-            self._warnings_issued = False
-
-        def _check_lib(self, func_name):
-            if not self._warnings_issued:
-                print(f"MockGPIO: {func_name} called. RPi.GPIO not available. Simulating operation.")
-            return True # Allow mocked operation
+            self._pin_setups = {} # pin: {"direction": OUT/IN, "value": HIGH/LOW, "pud": PUD_UP/DOWN}
+            self._warnings_on = True # Corresponds to GPIO.setwarnings(True)
 
         def setmode(self, mode):
-            self._check_lib("setmode")
             self._mode = mode
-            print(f"MockGPIO: Mode set to {mode}")
+            print(f"MockGPIO: Mode set to {self._mode}")
 
         def setup(self, pin, direction, initial=None, pull_up_down=None):
-            self._check_lib("setup")
-            if pin not in self._pin_setups: self._pin_setups[pin] = {}
-            self._pin_setups[pin]["direction"] = direction
+            if pin in self._pin_setups and self._warnings_on:
+                 print(f"MockGPIO Warning: Pin {pin} already setup. Overwriting.")
+            self._pin_setups[pin] = {"direction": direction}
             if direction == self.OUT:
                 value_to_set = initial if initial is not None else self.LOW
                 self._pin_setups[pin]["value"] = value_to_set
-                print(f"MockGPIO: Pin {pin} setup as {direction}, initial value {value_to_set}")
+                print(f"MockGPIO: Pin {pin} setup as OUTPUT, initial value {('HIGH' if value_to_set == self.HIGH else 'LOW')}")
             elif direction == self.IN:
                 self._pin_setups[pin]["pud"] = pull_up_down
-                self._pin_setups[pin]["value"] = self.HIGH if pull_up_down == self.PUD_UP else self.LOW # Simplistic mock
-                print(f"MockGPIO: Pin {pin} setup as {direction}, pull_up_down {pull_up_down}")
-
+                # Simplistic mock: if pull-up, assume high, else low if pull-down or no pull
+                self._pin_setups[pin]["value"] = self.HIGH if pull_up_down == self.PUD_UP else self.LOW
+                print(f"MockGPIO: Pin {pin} setup as INPUT, pull_up_down {pull_up_down}, mocked value {('HIGH' if self._pin_setups[pin]['value'] == self.HIGH else 'LOW')}")
 
         def output(self, pin, value):
-            self._check_lib("output")
-            if pin in self._pin_setups and self._pin_setups[pin].get("direction") == self.OUT:
-                self_pin_setups[pin]["value"] = value
-                print(f"MockGPIO: Pin {pin} set to {value}")
-            else:
-                print(f"MockGPIO: Error - Pin {pin} not setup as output or not setup at all.")
-
+            if pin not in self._pin_setups or self._pin_setups[pin].get("direction") != self.OUT:
+                # RPi.GPIO raises RuntimeError if not setup as OUT
+                raise RuntimeError(f"MockGPIO: Pin {pin} not setup as OUTPUT or not setup at all.")
+            self._pin_setups[pin]["value"] = value
+            print(f"MockGPIO: Pin {pin} set to {('HIGH' if value == self.HIGH else 'LOW')}")
 
         def input(self, pin):
-            self._check_lib("input")
-            if pin in self._pin_setups and self._pin_setups[pin].get("direction") == self.IN:
-                val = self._pin_setups[pin].get("value", self.LOW) # Default to LOW if not set
-                print(f"MockGPIO: Reading from pin {pin}, returning {val}")
-                return val
-            print(f"MockGPIO: Error - Pin {pin} not setup as input or not setup at all.")
-            return self.LOW # Default return for error
+            if pin not in self._pin_setups or self._pin_setups[pin].get("direction") != self.IN:
+                 # RPi.GPIO raises RuntimeError if not setup as IN
+                raise RuntimeError(f"MockGPIO: Pin {pin} not setup as INPUT or not setup at all.")
+            val = self._pin_setups[pin].get("value", self.LOW) # Default to LOW
+            print(f"MockGPIO: Reading from pin {pin}, returning {('HIGH' if val == self.HIGH else 'LOW')}")
+            return val
 
-        def cleanup(self, pin=None):
-            self._check_lib("cleanup")
-            if pin:
-                if pin in self._pin_setups:
-                    del self._pin_setups[pin]
-                print(f"MockGPIO: Cleaned up pin {pin}")
-            else:
+        def cleanup(self, pin_or_channel_list=None):
+            if pin_or_channel_list is None: # cleanup all
                 self._pin_setups.clear()
-                print("MockGPIO: Cleaned up all channels")
+                print("MockGPIO: Cleaned up all channels.")
+            elif isinstance(pin_or_channel_list, int): # cleanup single pin
+                if pin_or_channel_list in self._pin_setups:
+                    del self._pin_setups[pin_or_channel_list]
+                print(f"MockGPIO: Cleaned up pin {pin_or_channel_list}.")
+            elif isinstance(pin_or_channel_list, list): # cleanup list of pins
+                 for p in pin_or_channel_list:
+                     if p in self._pin_setups: del self._pin_setups[p]
+                 print(f"MockGPIO: Cleaned up pins {pin_or_channel_list}.")
+
+
+        def setwarnings(self, state_bool):
+            self._warnings_on = state_bool # True means warnings are on (like GPIO.setwarnings(True))
+            print(f"MockGPIO: Warnings set to {state_bool}")
         
-        def setwarnings(self, state):
-            self._warnings_issued = not state # if state is False, warnings are enabled
-            print(f"MockGPIO: Warnings set to {state}")
+        def getmode(self):
+            return self._mode
 
     GPIO = MockGPIO() # Replace actual GPIO with mock if lib not found
 
+class GPIOControllerError(Exception):
+    """Custom exception for GPIOController errors."""
+    pass
+
 class GPIOController:
     def __init__(self, mode_str="BCM"):
-        if not HAS_GPIO_LIB:
+        self.is_mocked = not HAS_GPIO_LIB
+        if self.is_mocked:
             print("GPIOController: Initializing with Mock RPi.GPIO.")
         
-        GPIO.setwarnings(False)
-        if mode_str.upper() == "BCM":
-            GPIO.setmode(GPIO.BCM)
-        elif mode_str.upper() == "BOARD":
-            GPIO.setmode(GPIO.BOARD)
-        else:
-            raise ValueError("Invalid GPIO mode. Choose 'BCM' or 'BOARD'.")
-        print(f"GPIOController: Mode set to {mode_str.upper()}")
-        self.pin_directions = {} # Store configured direction to avoid re-setup issues
+        try:
+            # Set warnings to False to prevent console messages for re-setup, etc.
+            # We will handle errors explicitly.
+            GPIO.setwarnings(False) 
+            
+            current_gpio_mode = GPIO.getmode() # Can be None if not set, or BCM/BOARD/etc.
+            
+            target_mode = None
+            if mode_str.upper() == "BCM":
+                target_mode = GPIO.BCM
+            elif mode_str.upper() == "BOARD":
+                target_mode = GPIO.BOARD
+            else:
+                raise GPIOControllerError(f"Invalid GPIO mode '{mode_str}'. Choose 'BCM' or 'BOARD'.")
+
+            # Only call setmode if it hasn't been set or is different
+            # RPi.GPIO raises an error if setmode is called multiple times with different modes
+            # or even the same mode after pins are in use. It's best to set it once.
+            # However, for simplicity in a script that might be run multiple times or re-instantiate this,
+            # we might need a strategy. The safest is to clean up fully on exit.
+            # For now, if a mode is set and different, it's an issue. If no mode set, we set it.
+            if current_gpio_mode is None:
+                GPIO.setmode(target_mode)
+                print(f"GPIOController: Mode set to {mode_str.upper()}")
+            elif current_gpio_mode != target_mode:
+                 raise GPIOControllerError(
+                    f"GPIO mode conflict. Current mode is {current_gpio_mode}, "
+                    f"requested {target_mode}. Cleanup GPIO before changing mode."
+                )
+            else:
+                print(f"GPIOController: Mode already set to {mode_str.upper()}")
+
+        except Exception as e: # Catch errors from RPi.GPIO's setmode/getmode or our logic
+            raise GPIOControllerError(f"Failed to initialize GPIO controller mode: {e}")
+
+        self.pin_configs = {} # pin: {"direction": "output"/"input"}
+
+
+    def _validate_pin(self, pin):
+        if not isinstance(pin, int) or not (0 <= pin <= 40): # Basic check for RPi pins
+            raise GPIOControllerError(f"Invalid pin number {pin}. Must be an integer (e.g., 0-40).")
 
     def setup_pin_direction(self, pin, direction_str, initial_str=None, pull_up_down_str=None):
-        print(f"GPIOController: Setting up pin {pin} as {direction_str}")
-        direction = GPIO.OUT if direction_str.lower() == "output" else GPIO.IN
+        self._validate_pin(pin)
+        print(f"GPIOController: Setting up pin {pin} as {direction_str.upper()}")
         
-        initial_val = None
-        if initial_str:
-            initial_val = GPIO.HIGH if initial_str.lower() == "high" else GPIO.LOW
+        try:
+            direction = GPIO.OUT if direction_str.lower() == "output" else GPIO.IN
+            
+            initial_val = None
+            if direction_str.lower() == "output" and initial_str:
+                initial_val = GPIO.HIGH if initial_str.lower() == "high" else GPIO.LOW
 
-        pud = None
-        if pull_up_down_str:
-            if pull_up_down_str.lower() == "pull_up": pud = GPIO.PUD_UP
-            elif pull_up_down_str.lower() == "pull_down": pud = GPIO.PUD_DOWN
-            # else GPIO.PUD_OFF (or no pull) is default if library supports it explicitly
+            pud = None
+            if direction_str.lower() == "input" and pull_up_down_str:
+                if pull_up_down_str.lower() == "pull_up": pud = GPIO.PUD_UP
+                elif pull_up_down_str.lower() == "pull_down": pud = GPIO.PUD_DOWN
+                # else GPIO.PUD_OFF is the default for RPi.GPIO if no pull_up_down is specified
 
-        if direction == GPIO.OUT:
-            if initial_val is not None:
-                 GPIO.setup(pin, direction, initial=initial_val)
-            else:
-                 GPIO.setup(pin, direction) # Default initial usually LOW
-        elif direction == GPIO.IN:
-            if pud is not None:
-                GPIO.setup(pin, direction, pull_up_down=pud)
-            else:
-                GPIO.setup(pin, direction)
-        self.pin_directions[pin] = direction_str.lower()
+            if direction == GPIO.OUT:
+                if initial_val is not None:
+                    GPIO.setup(pin, direction, initial=initial_val)
+                else:
+                    GPIO.setup(pin, direction) 
+            elif direction == GPIO.IN:
+                if pud is not None:
+                    GPIO.setup(pin, direction, pull_up_down=pud)
+                else:
+                    GPIO.setup(pin, direction)
+            
+            self.pin_configs[pin] = {"direction": direction_str.lower()}
+            print(f"GPIOController: Pin {pin} successfully set up as {direction_str.upper()}.")
+
+        except RuntimeError as e: # RPi.GPIO specific errors (e.g., pin already in use differently)
+            raise GPIOControllerError(f"RPi.GPIO RuntimeError setting up pin {pin}: {e}")
+        except Exception as e: # Other unexpected errors
+            raise GPIOControllerError(f"Unexpected error setting up pin {pin}: {e}")
 
 
     def set_pin_output(self, pin, value_str):
-        if self.pin_directions.get(pin) != "output":
-            print(f"Warning: Pin {pin} not configured as output. Setting up as output now.")
-            self.setup_pin_direction(pin, "output", initial_str=value_str)
-            # GPIO.setup(pin, GPIO.OUT) # Simple setup if not configured
+        self._validate_pin(pin)
+        if self.pin_configs.get(pin, {}).get("direction") != "output":
+            raise GPIOControllerError(f"Pin {pin} not configured as output. Call setup_pin_direction first.")
         
-        value = GPIO.HIGH if value_str.lower() == "high" else GPIO.LOW
-        GPIO.output(pin, value)
-        print(f"GPIOController: Pin {pin} set to {value_str.upper()}")
+        try:
+            value = GPIO.HIGH if value_str.lower() == "high" else GPIO.LOW
+            GPIO.output(pin, value)
+            print(f"GPIOController: Pin {pin} set to {value_str.upper()}")
+        except RuntimeError as e:
+            raise GPIOControllerError(f"RPi.GPIO RuntimeError setting output for pin {pin}: {e}")
+        except Exception as e:
+            raise GPIOControllerError(f"Unexpected error setting output for pin {pin}: {e}")
 
     def read_pin_input(self, pin):
-        if self.pin_directions.get(pin) != "input":
-            print(f"Warning: Pin {pin} not configured as input. Setting up as input now.")
-            self.setup_pin_direction(pin, "input")
-            # GPIO.setup(pin, GPIO.IN) # Simple setup if not configured
+        self._validate_pin(pin)
+        if self.pin_configs.get(pin, {}).get("direction") != "input":
+            raise GPIOControllerError(f"Pin {pin} not configured as input. Call setup_pin_direction first.")
 
-        value = GPIO.input(pin)
-        state = "HIGH" if value == GPIO.HIGH else "LOW"
-        print(f"GPIOController: Pin {pin} read as {state}")
-        return state
+        try:
+            value = GPIO.input(pin)
+            state = "HIGH" if value == GPIO.HIGH else "LOW"
+            print(f"GPIOController: Pin {pin} read as {state}")
+            return state
+        except RuntimeError as e:
+            raise GPIOControllerError(f"RPi.GPIO RuntimeError reading input from pin {pin}: {e}")
+        except Exception as e:
+            raise GPIOControllerError(f"Unexpected error reading input from pin {pin}: {e}")
+
 
     def pulse_pin_output(self, pin, duration_ms, pulse_state_str="high", initial_state_str=None):
-        if self.pin_directions.get(pin) != "output":
-            print(f"Warning: Pin {pin} not configured as output for pulse. Setting up now.")
-            # Determine a sensible default for initial if setting up here
-            temp_initial = initial_state_str if initial_state_str else ("low" if pulse_state_str=="high" else "high")
-            self.setup_pin_direction(pin, "output", initial_str=temp_initial)
+        self._validate_pin(pin)
+        if self.pin_configs.get(pin, {}).get("direction") != "output":
+             raise GPIOControllerError(f"Pin {pin} not configured for output (for pulse). Call setup_pin_direction first.")
 
-        active_state = GPIO.HIGH if pulse_state_str.lower() == "high" else GPIO.LOW
-        
-        if initial_state_str:
-            inactive_state = GPIO.HIGH if initial_state_str.lower() == "high" else GPIO.LOW
-        else: # Default inactive is opposite of active
-            inactive_state = GPIO.LOW if active_state == GPIO.HIGH else GPIO.HIGH
+        try:
+            active_state = GPIO.HIGH if pulse_state_str.lower() == "high" else GPIO.LOW
+            
+            if initial_state_str:
+                inactive_state = GPIO.HIGH if initial_state_str.lower() == "high" else GPIO.LOW
+            else: 
+                inactive_state = GPIO.LOW if active_state == GPIO.HIGH else GPIO.HIGH
 
-        GPIO.output(pin, inactive_state) # Ensure starting from inactive
-        time.sleep(0.001) # Ensure state settles
-        GPIO.output(pin, active_state)   # Start pulse
-        print(f"GPIOController: Pin {pin} pulsed to {pulse_state_str.upper()} for {duration_ms}ms (from {initial_state_str or 'opposite'})")
-        time.sleep(duration_ms / 1000.0)
-        GPIO.output(pin, inactive_state) # End pulse
-        print(f"GPIOController: Pin {pin} pulse ended, returned to {'HIGH' if inactive_state == GPIO.HIGH else 'LOW'}")
+            # Set to initial/inactive state first
+            GPIO.output(pin, inactive_state)
+            time.sleep(0.001) # Small delay to ensure state settles
 
+            # Perform pulse
+            GPIO.output(pin, active_state)
+            print(f"GPIOController: Pin {pin} pulsed to {pulse_state_str.upper()} for {duration_ms}ms (from {'HIGH' if inactive_state == GPIO.HIGH else 'LOW'})")
+            time.sleep(duration_ms / 1000.0)
+            GPIO.output(pin, inactive_state)
+            print(f"GPIOController: Pin {pin} pulse ended, returned to {'HIGH' if inactive_state == GPIO.HIGH else 'LOW'}")
+
+        except RuntimeError as e:
+            raise GPIOControllerError(f"RPi.GPIO RuntimeError during pulse for pin {pin}: {e}")
+        except Exception as e:
+            raise GPIOControllerError(f"Unexpected error during pulse for pin {pin}: {e}")
 
     def cleanup(self, pin=None):
-        print(f"GPIOController: Cleaning up {'pin ' + str(pin) if pin else 'all pins'}.")
-        if HAS_GPIO_LIB: # Only call GPIO.cleanup if the library was available
-            if pin is None:
-                GPIO.cleanup()
-                self.pin_directions.clear()
-            elif pin in self.pin_directions:
-                 GPIO.cleanup(pin)
-                 del self.pin_directions[pin]
-            else:
-                print(f"GPIOController: Pin {pin} was not set up by this controller.")
-        else:
-            if pin is None: self.pin_directions.clear()
-            elif pin in self.pin_directions: del self.pin_directions[pin]
+        action_taken = False
+        try:
+            if not self.is_mocked: # Only attempt real cleanup if not mocked
+                if pin is None: # Cleanup all pins used by this controller instance
+                    if self.pin_configs:
+                        GPIO.cleanup(list(self.pin_configs.keys()))
+                        print(f"GPIOController: Cleaned up pins: {list(self.pin_configs.keys())}")
+                        self.pin_configs.clear()
+                        action_taken = True
+                    else:
+                        print("GPIOController: No pins were configured by this instance to clean up individually. General GPIO.cleanup() if needed.")
+                        # Optionally, call general GPIO.cleanup() if you want to be sure, but it cleans up everything.
+                        # GPIO.cleanup() # This cleans ALL channels, not just those used by this instance.
+                        # print("GPIOController: Called general GPIO.cleanup().")
+                elif isinstance(pin, int):
+                    self._validate_pin(pin)
+                    if pin in self.pin_configs:
+                        GPIO.cleanup(pin)
+                        print(f"GPIOController: Cleaned up pin {pin}")
+                        del self.pin_configs[pin]
+                        action_taken = True
+                    else:
+                        print(f"GPIOController: Pin {pin} was not in this controller's config or already cleaned.")
+                else:
+                    raise GPIOControllerError("Invalid argument for cleanup. Must be a pin number or None.")
+            else: # Mocked cleanup
+                if pin is None: self.pin_configs.clear()
+                elif pin in self.pin_configs: del self.pin_configs[pin]
+                print(f"MockGPIOController: Simulated cleanup for {'pin ' + str(pin) if pin else 'all controlled pins'}.")
+                action_taken = True
+
+            if not action_taken and pin is None:
+                 print("GPIOController: No specific pins to clean up by this instance, or using mock.")
+
+
+        except RuntimeError as e: # Catch errors if cleanup fails (e.g., permissions)
+            print(f"GPIOController Warning: RuntimeError during GPIO cleanup: {e}")
+        except Exception as e:
+            print(f"GPIOController Warning: Unexpected error during GPIO cleanup: {e}")
 
 
     def __enter__(self):
+        # Initialization is done in __init__
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        # Cleanup all pins managed by this instance on exit
+        print("GPIOController exiting context, performing cleanup...")
         self.cleanup()

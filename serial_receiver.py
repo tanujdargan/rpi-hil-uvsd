@@ -1,15 +1,20 @@
-# hil_tester_cli/serial_receiver.py
 import serial
 import time
 import json
 from signal import signal, SIGINT
 from sys import exit as sys_exit
 
-DEFAULT_SERIAL_PORT = "/dev/ttyACM0" # You can centralize defaults
+DEFAULT_SERIAL_PORT = "/dev/ttyACM0"
 DEFAULT_BAUD_RATE = 115200
+
+class SerialReceiverError(Exception):
+    """Custom exception for SerialReceiver errors."""
+    pass
 
 class SerialReceiver:
     def __init__(self, port=DEFAULT_SERIAL_PORT, baudrate=DEFAULT_BAUD_RATE, timeout=1):
+        if not port or not isinstance(port, str):
+            raise SerialReceiverError(f"Invalid serial port specified: {port}. Must be a string (e.g., '/dev/ttyACM0').")
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout # Default timeout for individual readline calls
@@ -19,168 +24,179 @@ class SerialReceiver:
 
 
     def connect(self):
+        if self.ser and self.ser.is_open:
+            print("SerialReceiver Warning: Already connected. Closing existing connection first.")
+            self.disconnect()
         try:
             self.ser = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
             print(f"SerialReceiver: Successfully connected to {self.port}.")
-            time.sleep(0.1) # Allow connection to settle
-            self.ser.reset_input_buffer() # Clear any old data
-            time.sleep(0.1)
+            # It's good practice to wait briefly and clear buffers after opening
+            time.sleep(0.2) # Increased slightly
+            self.ser.reset_input_buffer()
+            self.ser.reset_output_buffer()
             return True
         except serial.SerialException as e:
-            print(f"SerialReceiver Error: Could not open port {self.port}: {e}")
-            self.ser = None
-            return False
+            # This exception is quite broad, can be port not found, permission denied, etc.
+            raise SerialReceiverError(f"Could not open serial port '{self.port}': {e}")
+        except Exception as e: # Catch any other unexpected error during connection
+            raise SerialReceiverError(f"Unexpected error connecting to serial port '{self.port}': {e}")
+
 
     def disconnect(self):
         if self.ser and self.ser.is_open:
-            self.ser.close()
-            print(f"SerialReceiver: Port {self.port} closed.")
-        self.ser = None
+            try:
+                self.ser.close()
+                print(f"SerialReceiver: Port {self.port} closed.")
+            except Exception as e:
+                print(f"SerialReceiver Warning: Error closing serial port {self.port}: {e}")
+        self.ser = None # Ensure it's None even if close fails
 
     def read_line(self, timeout_override=None) -> str | None:
-        if not (self.ser and self.ser.is_open):
-            # print("SerialReceiver Error: Not connected for reading line.") # Can be too noisy
-            return None
+        if not self.is_connected():
+            # This can be very noisy if called in a loop when not connected.
+            # Consider raising an error or ensuring connect is called first.
+            # For now, returning None.
+            return None 
         
         original_timeout = self.ser.timeout
-        if timeout_override is not None:
-            self.ser.timeout = timeout_override
+        actual_timeout = timeout_override if timeout_override is not None else self.ser.timeout
         
         try:
-            line_bytes = self.ser.readline()
-            if timeout_override is not None:
-                self.ser.timeout = original_timeout # Restore
+            if timeout_override is not None: # Temporarily set timeout if overridden
+                self.ser.timeout = actual_timeout
+            
+            line_bytes = self.ser.readline() # This will block up to 'actual_timeout'
             
             if line_bytes:
                 return line_bytes.decode('utf-8', errors='replace').strip()
-            return "" # Return empty string for timeout on readline if that's desired, or None
+            return "" # Timeout occurred, readline returned empty bytes
+        except serial.SerialException as e: # E.g. device disconnected
+            raise SerialReceiverError(f"SerialException while reading line from {self.port}: {e}")
         except Exception as e:
-            print(f"SerialReceiver Error reading line: {e}")
-            if timeout_override is not None:
-                self.ser.timeout = original_timeout
-            return None
+            raise SerialReceiverError(f"Unexpected error reading line from {self.port}: {e}")
+        finally:
+            if timeout_override is not None and self.is_connected(): # Restore original timeout
+                try:
+                    self.ser.timeout = original_timeout
+                except Exception: # e.g. if port closed due to error during read
+                    pass
 
 
-    def receive_data(self, mode="lines", overall_timeout_s=10, stop_condition_line=None, idle_timeout_s=2) -> list[str] | dict | str | None:
+    def receive_data(self, mode="lines", overall_timeout_s=5, stop_condition_line=None, idle_timeout_s=1) -> list[str] | dict | str:
         """
-        Receives data from serial based on the specified mode.
-        - mode="lines": Returns a list of strings (lines).
-        - mode="json_object": Attempts to read and parse a single JSON object string. Returns a dict or None.
-        - mode="raw_stream": Returns the raw data collected as a single string.
+        Receives data. For simplified goal, mode='lines' or 'raw_stream' is fine.
+        Returns empty list/dict/string if no data or error that doesn't halt execution.
+        Raises SerialReceiverError for critical issues.
         """
-        if not (self.ser and self.ser.is_open):
-            print("SerialReceiver Error: Not connected.")
-            return None
+        if not self.is_connected():
+            raise SerialReceiverError("Not connected. Cannot receive data.")
 
-        print(f"SerialReceiver: Receiving data (Mode: {mode}, Timeout: {overall_timeout_s}s, StopLine: '{stop_condition_line}', IdleTimeout: {idle_timeout_s}s)")
+        print(f"SerialReceiver: Receiving data (Mode: {mode}, OverallTimeout: {overall_timeout_s}s, StopLine: '{stop_condition_line}', IdleTimeout: {idle_timeout_s}s)")
         
         buffer = ""
         lines_received = []
         start_time = time.time()
         last_data_time = time.time()
 
-        while (time.time() - start_time) < overall_timeout_s:
-            if (time.time() - last_data_time) > idle_timeout_s and mode != "json_object": # For json_object, wait longer for whole object
-                 # For json_object, we might want to rely more on overall_timeout_s unless we implement incremental JSON parsing
-                print(f"SerialReceiver: Idle timeout ({idle_timeout_s}s) reached.")
-                break
+        try:
+            while (time.time() - start_time) < overall_timeout_s:
+                if (time.time() - last_data_time) > idle_timeout_s:
+                    if mode == "json_object" and buffer.count('{') > buffer.count('}'): # Still waiting for json to complete
+                         pass # Continue if it looks like we are mid-JSON
+                    else:
+                        print(f"SerialReceiver: Idle timeout ({idle_timeout_s}s) reached.")
+                        break
 
-            # Read available bytes, don't block for a full line if in json_object or raw_stream mode
-            bytes_to_read = self.ser.in_waiting
-            if bytes_to_read > 0:
-                try:
-                    data_chunk = self.ser.read(bytes_to_read).decode('utf-8', errors='replace')
-                    buffer += data_chunk
-                    last_data_time = time.time()
-                    # print(f"DBG: read chunk: {data_chunk[:50]}... buffer len: {len(buffer)}") # Debug
-                except Exception as e:
-                    print(f"SerialReceiver: Error reading chunk: {e}")
-                    break # Exit loop on read error
-            else: # No data in_waiting
-                time.sleep(0.02) # Small sleep to prevent busy loop
+                bytes_available = self.ser.in_waiting
+                if bytes_available > 0:
+                    data_chunk = self.ser.read(bytes_available).decode('utf-8', errors='replace')
+                    if data_chunk: # If actual data was read
+                        buffer += data_chunk
+                        last_data_time = time.time()
+                else: # No data immediately available
+                    time.sleep(0.05) # Short poll delay
 
-            if mode == "lines":
-                while '\n' in buffer:
-                    line, buffer = buffer.split('\n', 1)
-                    line = line.strip()
-                    if line: # Avoid adding empty lines from multiple newlines
-                        lines_received.append(line)
-                        print(f"  Line Rcvd: \"{line}\"")
-                        if stop_condition_line and line == stop_condition_line:
+                if mode == "lines":
+                    while '\n' in buffer:
+                        line, buffer = buffer.split('\n', 1)
+                        processed_line = line.strip() # Strip here
+                        # if processed_line: # Only add if not empty after strip
+                        lines_received.append(processed_line) # Add even if empty after strip, if newline was there
+                        print(f"  Line Rcvd: \"{processed_line}\"")
+                        if stop_condition_line and processed_line == stop_condition_line:
                             print("  Stop condition line met.")
                             return lines_received
+                elif mode == "json_object":
+                    # Try to parse if buffer looks like it might contain a complete JSON object
+                    # This is heuristic. A robust solution requires framing or a streaming parser.
+                    if buffer.strip().startswith('{') and buffer.strip().endswith('}'):
+                        try:
+                            json_obj = json.loads(buffer.strip())
+                            print(f"  JSON Object Rcvd & Parsed. Root type: {type(json_obj).__name__}")
+                            return json_obj
+                        except json.JSONDecodeError:
+                             pass # Not a complete JSON object yet, or invalid
+                # For "raw_stream", we just accumulate.
+            
+            # Loop ended (timeout or other break)
+            if mode == "lines":
+                if buffer.strip(): # Process any remaining part of the buffer
+                    lines_received.append(buffer.strip())
+                    print(f"  Line Rcvd (final buffer): \"{buffer.strip()}\"")
+                return lines_received
             elif mode == "json_object":
-                # Attempt to parse JSON from buffer. This is tricky.
-                # A robust way is to find matching braces, but for simplicity here,
-                # we might just try parsing the whole buffer on each new data chunk
-                # if a potential end of JSON is detected (e.g., '}')
-                if '}' in data_chunk: # Heuristic: try to parse if we see a closing brace
-                    try:
-                        # Find the first '{' and last '}' to extract a potential JSON object
-                        # This is still not robust for nested structures or multiple objects.
-                        # For true robustness, use a proper streaming JSON parser or framing protocol.
-                        first_brace = buffer.find('{')
-                        last_brace = buffer.rfind('}')
-                        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-                            potential_json_str = buffer[first_brace : last_brace+1]
-                            # print(f"DBG: Potential JSON: {potential_json_str[:100]}...") # Debug
-                            json_obj = json.loads(potential_json_str)
-                            print(f"  JSON Object Rcvd & Parsed. Keys: {list(json_obj.keys()) if isinstance(json_obj, dict) else 'N/A (not a dict)'}")
-                            return json_obj # Success
-                        # else: print("DBG: Braces not forming a clear object yet.") # Debug
-                    except json.JSONDecodeError:
-                        # print("DBG: JSONDecodeError, waiting for more data or timeout.") # Debug
-                        pass # Not a complete JSON object yet
-                    except Exception as e:
-                        print(f"SerialReceiver: Error during tentative JSON parsing: {e}")
-                        # This might be a non-JSON string if parsing failed badly
-                        # Could return buffer here if that's the desired fallback for json_object mode failure.
-
-            # For mode "raw_stream", we just accumulate in buffer
-
-        # Loop ended (timeout or other condition)
-        if mode == "lines":
-            if buffer.strip(): # Any remaining part in buffer not ending with newline
-                lines_received.append(buffer.strip())
-                print(f"  Line Rcvd (final buffer): \"{buffer.strip()}\"")
-            return lines_received
-        elif mode == "json_object":
-            # Final attempt to parse whatever is in the buffer as JSON
-            print("SerialReceiver: Timeout for JSON object. Final parse attempt on buffer.")
-            try:
-                first_brace = buffer.find('{')
-                last_brace = buffer.rfind('}')
-                if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-                    potential_json_str = buffer[first_brace : last_brace+1]
-                    json_obj = json.loads(potential_json_str)
-                    print(f"  JSON Object Rcvd & Parsed (final attempt). Keys: {list(json_obj.keys()) if isinstance(json_obj,dict) else 'N/A'}")
+                print("SerialReceiver: Timeout or end of data for JSON object. Final parse attempt.")
+                try:
+                    json_obj = json.loads(buffer.strip()) # Try to parse the whole stripped buffer
+                    print(f"  JSON Object Rcvd & Parsed (final attempt). Root type: {type(json_obj).__name__}")
                     return json_obj
-                else:
-                    print("SerialReceiver: Could not form a JSON object from final buffer content.")
-                    print(f"Final buffer content was: '{buffer}'")
-                    return {"error": "incomplete_json_received", "buffer": buffer} # Indicate error
-            except json.JSONDecodeError:
-                print("SerialReceiver: Final JSON parse attempt failed.")
-                print(f"Final buffer content was: '{buffer}'")
-                return {"error": "invalid_json_received", "buffer": buffer} # Indicate error
-        elif mode == "raw_stream":
-            print(f"SerialReceiver: Raw stream reception complete. Length: {len(buffer)}")
-            return buffer
+                except json.JSONDecodeError:
+                    print(f"SerialReceiver: Final JSON parse attempt failed. Buffer content: '{buffer.strip()}'")
+                    # Return an error structure or the raw buffer
+                    return {"error": "invalid_or_incomplete_json", "buffer": buffer.strip()}
+            elif mode == "raw_stream":
+                return buffer.strip() # Return the full accumulated buffer, stripped
 
-        return None # Default if no data or unhandled mode
+        except serial.SerialException as e:
+            raise SerialReceiverError(f"SerialException during data reception from {self.port}: {e}")
+        except Exception as e:
+            raise SerialReceiverError(f"Unexpected error during data reception from {self.port}: {e}")
+        
+        # Fallback return for modes if loop finishes without specific return
+        if mode == "lines": return lines_received
+        if mode == "json_object": return {"error": "timeout_before_valid_json", "buffer": buffer.strip()}
+        if mode == "raw_stream": return buffer.strip()
+        return "" # Default for unknown mode or if nothing specific happened
+
+
+    def is_connected(self):
+        return self.ser and self.ser.is_open
 
     def __enter__(self):
-        self._original_sigint_handler = signal(SIGINT, self._graceful_exit_handler)
-        if not self.connect():
-            raise ConnectionError(f"Failed to connect to serial port {self.port}")
+        # SIGINT handling setup
+        self._original_sigint_handler = signal(SIGINT, self._graceful_exit_handler_sigint)
+        try:
+            self.connect()
+        except SerialReceiverError as e:
+            # Restore original SIGINT handler if connect fails before __exit__ is called
+            if self._original_sigint_handler:
+                signal(SIGINT, self._original_sigint_handler)
+            raise # Re-raise the connection error
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.disconnect()
+        # Restore original SIGINT handler
         if self._original_sigint_handler:
             signal(SIGINT, self._original_sigint_handler)
+            self._original_sigint_handler = None # Avoid multiple restores if __exit__ called again
 
-    def _graceful_exit_handler(self, sig, frame):
-        print("\nSIGINT or CTRL-C detected by SerialReceiver. Closing port and exiting.")
-        self.disconnect()
+    def _graceful_exit_handler_sigint(self, sig, frame):
+        print("\nSIGINT or CTRL-C detected by SerialReceiver. Closing port...")
+        # self.disconnect() # __exit__ will handle this.
+        # To ensure exit, and if __exit__ isn't guaranteed (e.g. error in __enter__ before ser is set)
+        if self.ser and self.ser.is_open:
+            try: self.ser.close()
+            except: pass # Ignore errors on close during critical exit
+        print("Serial port closed due to SIGINT. Exiting script.")
         sys_exit(1)
